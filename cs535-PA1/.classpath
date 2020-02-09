@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <classpath>
 	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER/org.eclipse.jdt.internal.debug.ui.launcher.StandardVMType/JavaSE-1.8"/>
-	<classpathentry kind="src" path="src"/>
+	<classpathentry kind="src" path="src/main/java"/>
 	<classpathentry kind="lib" path="C:/Users/Admin/git/cs455TermProject2/spark-2.4.1-bin-hadoop2.7/examples/jars/scopt_2.11-3.7.0.jar"/>
 	<classpathentry kind="lib" path="C:/Users/Admin/git/cs455TermProject2/spark-2.4.1-bin-hadoop2.7/examples/jars/spark-examples_2.11-2.4.1.jar"/>
 	<classpathentry kind="lib" path="C:/Users/Admin/git/cs455TermProject2/spark-2.4.1-bin-hadoop2.7/jars/activation-1.1.1.jar"/>
