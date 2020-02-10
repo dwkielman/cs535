@@ -43,7 +43,7 @@ public class WikiDriver extends Driver {
         // put the titles file in an RDD with the index to sort from
         String loweredQuery = query.toLowerCase();
         JavaRDD<String> titlesRDD = sc.textFile(HDFS_TITLES_SORTED).filter(s -> isEmptyValue(s));
-        JavaPairRDD<String, Long> titlesWithIndexRDD = titlesRDD.zipWithIndex().mapToPair(s -> new Tuple2<String, Long>(s._1.toLowerCase(), s._2));
+        JavaPairRDD<String, Long> titlesWithIndexRDD = titlesRDD.zipWithIndex().mapToPair(s -> new Tuple2<String, Long>(s._1.toLowerCase(), (s._2 + 1)));
         JavaPairRDD<String, Long> filteredTitlesWithIndex = titlesWithIndexRDD.filter(s -> s._1.contains(loweredQuery));
         JavaPairRDD<Long, String> rootSetRDD = filteredTitlesWithIndex.mapToPair(f -> new Tuple2<Long, String>(f._2, f._1)).cache();
         int size = rootSetRDD.values().collect().size();
@@ -62,14 +62,98 @@ public class WikiDriver extends Driver {
         
         JavaPairRDD<Long, String> linksPairRDD = linksRDD.mapToPair(f -> {
         	String[] split = f.split(LINKS_DELIMITER);
-        	return new Tuple2<Long, String>((Long.parseLong(split[0]) - 1), split[1]);
+        	long key = Long.parseLong(split[0]);
+        	return new Tuple2<Long, String>(key, split[1]);
         });
        
+        // Get the Links that the root set links to
+        JavaPairRDD<Long, String> linkedToRootRDD = rootSetRDD.join(linksPairRDD).mapToPair(f -> {
+        	return new Tuple2<Long, String>(f._1, f._2._2);
+        });
+        
+        JavaPairRDD<Long, Long> flattenedLinks = linkedToRootRDD.flatMapToPair(f -> {
+        	long key = f._1;
+        	String[] values = f._2.trim().split(LINKS_VALUES_DELIMITER);
+        	
+        	List<Tuple2<Long, Long>> returnList = new ArrayList();
+        	
+        	for (String s : values) {
+        		returnList.add(new Tuple2<>(key, Long.parseLong(s)));
+        	}
+        	return returnList.iterator();
+        });
+        
+        JavaRDD<Long> distintRDDRootLinks = flattenedLinks.values();
+        
+        //List<Long> distinctRootLinks = flattenedLinks.values().distinct().collect();
+        
+        List<Long> rootSetKeys = rootSetRDD.keys().collect();
+        
+        // get the pages that link to the root set
+        JavaRDD<Long> pagesThatLinkToRootSet = linksPairRDD.filter(f -> {
+        	String[] values = f._2.trim().split(LINKS_VALUES_DELIMITER);
+        	for (String s : values) {
+        		if (rootSetKeys.contains(Long.parseLong(s))) {
+        			return true;
+        		}
+        	}
+        	return false;
+        }).map(f -> {
+        	return f._1;
+        });
+        
+        JavaRDD<Long> rootRDDKeys = rootSetRDD.keys();
+        
+        JavaRDD<Long> baseSetMaybe = pagesThatLinkToRootSet.union(distintRDDRootLinks).union(rootRDDKeys);
+        JavaRDD<Long> distinctBaseSetMaybe = baseSetMaybe.distinct();
+        
+        int baseSize = distinctBaseSetMaybe.collect().size();
+        List<Long> sampleBaseKey = distinctBaseSetMaybe.collect();
+        //List<String> sampleBaseValue = linkedToRootRDD.values().collect();
+        List<String> writeMeBase = new ArrayList<>();
+        writeMeBase.add("Base Set");
+        writeMeBase.add("========\n");
+        writeMeBase.add("Total in Base Set: " + baseSize);
+        
+        for (int i=1; i < 11; i++) {
+        	writeMeBase.add("Key: " + sampleBaseKey.get(i));
+        }
+        
+        writeMeBase.add("Flattened Links Sample Set");
+        List<Long> flattenedKeys = flattenedLinks.keys().collect();
+        List<Long> flattnedValues = flattenedLinks.values().collect();
+        writeMeBase.add("========\n");
+        writeMeBase.add("Total in Flattened Links Keys Set: " + flattenedKeys.size());
+        writeMeBase.add("Total in Flattened Links Values Set: " + flattnedValues.size());
+        
+        for (int i=1; i < 11; i++) {
+        	writeMeBase.add("Flattened Key: " + flattenedKeys.get(i));
+        	writeMeBase.add("Flattened Value: " + flattnedValues.get(i));
+        }
+        
+        sc.parallelize(writeMeBase, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/BaseSet", HDFS_SERVER));
+        
+        /**
+        int baseSize = linkedToRootRDD.values().collect().size();
+        List<Long> sampleBaseKey = linkedToRootRDD.keys().collect();
+        List<String> sampleBaseValue = linkedToRootRDD.values().collect();
+        List<String> writeMeBase = new ArrayList<>();
+        writeMeBase.add("Base Set");
+        writeMeBase.add("========\n");
+        writeMeBase.add("Total in Base Set: " + baseSize);
+        
+        for (int i=1; i < 11; i++) {
+        	writeMeBase.add("Key: " + sampleBaseKey.get(i) + "Values:" + sampleBaseValue.get(i));
+        }
+        
+        sc.parallelize(writeMeBase, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/BaseSet", HDFS_SERVER));
 
+		**/
+        /**
         JavaPairRDD<String, Long> links = linksPairRDD.join(rootSetRDD).mapToPair(s -> {
         	return new Tuple2<String, Long>(s._2._1, s._1);
         });
-        
+        **/
         
         //JavaPairRDD<Long, String> baseSetPart1 = rootSetRDD.join(links).mapToPair(s -> new Tuple2<Long, String>(s._1, s._2._1));
         //JavaPairRDD<Long, String> baseSetPart2 = 
@@ -91,8 +175,7 @@ public class WikiDriver extends Driver {
         });
         **/
         
-       
-        
+        /**
         JavaPairRDD<Long, List<Long>> linkysLong = linksRDD.mapToPair(f -> {
         	String[] fromAndTo = f.split(LINKS_DELIMITER);
         	String[] tos = fromAndTo[1].trim().split(LINKS_VALUES_DELIMITER);
