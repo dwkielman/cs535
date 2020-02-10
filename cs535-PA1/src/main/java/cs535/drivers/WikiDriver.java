@@ -133,6 +133,89 @@ public class WikiDriver extends Driver {
         
         sc.parallelize(writeMeBase, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/BaseSet", HDFS_SERVER));
         
+        // hub and authority scores time
+        JavaPairRDD<Long, Double> hubScores = linkedToRootRDD.mapToPair(f -> new Tuple2<Long, Double>(f._1, 1.0));
+        JavaPairRDD<Long, Double> authorityScores = hubScores;
+        
+        boolean isScoreConverged = false;
+        
+        while (!isScoreConverged) {
+        	JavaPairRDD<Long, Double> rawAuthorityScores = flattenedLinks.join(hubScores).mapToPair(f -> new Tuple2<>(f._2._1, f._2._2)).reduceByKey((x, y) -> x + y);
+        	JavaPairRDD<Long, Double> rawHubScores = flattenedLinks.mapToPair(f -> new Tuple2<Long, Long>(f._2, f._1)).join(rawAuthorityScores).mapToPair(f -> new Tuple2<Long, Double>(f._2._1, f._2._2)).reduceByKey((x, y)-> x + y);
+        	
+        	double authrorityScoresSum = rawAuthorityScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
+        	JavaPairRDD<Long, Double> normalizedAuthorityScores = rawAuthorityScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / authrorityScoresSum)));
+        	
+        	double hubScoresSum = rawHubScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
+        	JavaPairRDD<Long, Double> normalizedHubScores = rawAuthorityScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / hubScoresSum)));
+        	
+        	boolean isAuthorityConverged = hasScoreConverged(normalizedAuthorityScores, authorityScores);
+        	boolean isHubConverged = hasScoreConverged(normalizedHubScores, hubScores);
+        	
+        	if (isAuthorityConverged && isHubConverged) {
+        		isScoreConverged = true;
+        	} else {
+        		hubScores = normalizedHubScores;
+        		authorityScores = normalizedAuthorityScores;
+        	}
+        	
+        }
+        
+        // print scores for top 50 in descending order
+        JavaPairRDD<String, Double> joinedHubScores = hubScores.join(rootSetRDD).mapToPair(f -> new Tuple2<Double, String>(f._2._1, f._2._2))
+	        	.sortByKey(false)
+	        	.mapToPair(f -> new Tuple2<String, Double>(f._2, f._1));
+        
+        JavaPairRDD<String, Double> joinedAuthorityScores = authorityScores.join(rootSetRDD).mapToPair(f -> new Tuple2<Double, String>(f._2._1, f._2._2))
+	        	.sortByKey(false)
+	        	.mapToPair(f -> new Tuple2<String, Double>(f._2, f._1));
+        
+        List<String> hubKeys = joinedHubScores.keys().collect();
+        List<Double> hubValues = joinedHubScores.values().collect();
+        
+        List<String> writeMeHub = new ArrayList<>();
+        writeMeHub.add("Hub Set");
+        writeMeHub.add("=======\n");
+        
+        int hubCount = 0;
+        
+        if (hubKeys.size() > 0) {
+        	if (hubKeys.size() < 100) {
+        		hubCount = hubKeys.size();
+        	} else {
+        		hubCount = 100;
+        	}
+        }
+        
+        for (int i = 0; i < hubCount; i++) {
+        	writeMeHub.add("Key: " + hubKeys.get(i) +  "Hub Score: " + hubValues.get(i));
+        }
+        
+        sc.parallelize(writeMeHub, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/HubScores", HDFS_SERVER));
+        
+        List<String> authorityKeys = joinedAuthorityScores.keys().collect();
+        List<Double> authorityValues = joinedAuthorityScores.values().collect();
+
+        List<String> writeMeAuthority = new ArrayList<>();
+        writeMeAuthority.add("Authority Set");
+        writeMeAuthority.add("=============\n");
+        
+        int authorityCount = 0;
+        
+        if (authorityKeys.size() > 0) {
+        	if (authorityKeys.size() < 100) {
+        		authorityCount = authorityKeys.size();
+        	} else {
+        		authorityCount = 100;
+        	}
+        }
+        
+        for (int i = 0; i < authorityCount; i++) {
+        	writeMeAuthority.add("Key: " + authorityKeys.get(i) +  "Authority Score: " + authorityValues.get(i));
+        }
+        
+        sc.parallelize(writeMeAuthority, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/AuthorityScores", HDFS_SERVER));
+        
         /**
         int baseSize = linkedToRootRDD.values().collect().size();
         List<Long> sampleBaseKey = linkedToRootRDD.keys().collect();
@@ -349,6 +432,18 @@ public class WikiDriver extends Driver {
         
         
         
+	}
+	
+	private static boolean hasScoreConverged(JavaPairRDD<Long, Double> newScores, JavaPairRDD<Long, Double> oldScores) {
+		JavaPairRDD<Long, Double> mergedScores = newScores.join(oldScores).filter(f -> {
+			if (Math.abs((f._2._1 - f._2._2)) > 0.01) {
+				return true;
+			}
+			return false;
+			
+		}).mapToPair(f -> new Tuple2<>(f._1, f._2._1));
+		
+		return mergedScores.count() < 10;
 	}
 	
 	private static boolean isRowValid(String split, String query) {
