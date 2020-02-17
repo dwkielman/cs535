@@ -18,6 +18,8 @@ public class WikiDriver extends Driver {
 	private static final String FILE_DELIMITER = "_";
 	private static final String LINKS_DELIMITER = ":";
 	private static final String LINKS_VALUES_DELIMITER = " ";
+	private static final double PERCENTILE_CORRECT = 0.9;
+	private static final double ACCURACY_PERCENT = 0.000001;
 	
 	public static void main(String[] args) {
 		
@@ -46,12 +48,13 @@ public class WikiDriver extends Driver {
         JavaPairRDD<String, Long> titlesWithIndexRDD = titlesRDD.zipWithIndex().mapToPair(s -> new Tuple2<String, Long>(s._1.toLowerCase(), (s._2 + 1)));
         JavaPairRDD<String, Long> filteredTitlesWithIndex = titlesWithIndexRDD.filter(s -> s._1.contains(loweredQuery));
         JavaPairRDD<Long, String> rootSetRDD = filteredTitlesWithIndex.mapToPair(f -> new Tuple2<Long, String>(f._2, f._1)).cache();
-        int size = rootSetRDD.values().collect().size();
+        //int size = rootSetRDD.values().collect().size();
+        long rootSetSize = rootSetRDD.count();
         
         List<String> writeMe = new ArrayList<>();
         writeMe.add("Root Set");
         writeMe.add("========\n");
-        writeMe.add("Total in Root Set: " + size);
+        writeMe.add("Total in Root Set: " + rootSetSize);
         sc.parallelize(writeMe, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/RootSet", HDFS_SERVER));
         
         
@@ -107,13 +110,14 @@ public class WikiDriver extends Driver {
         JavaRDD<Long> baseSetMaybe = pagesThatLinkToRootSet.union(distintRDDRootLinks).union(rootRDDKeys);
         JavaRDD<Long> distinctBaseSetMaybe = baseSetMaybe.distinct();
         
-        int baseSize = distinctBaseSetMaybe.collect().size();
+        //int baseSize = distinctBaseSetMaybe.collect().size();
+        long baseSetSize = distinctBaseSetMaybe.count();
         List<Long> sampleBaseKey = distinctBaseSetMaybe.collect();
         //List<String> sampleBaseValue = linkedToRootRDD.values().collect();
         List<String> writeMeBase = new ArrayList<>();
         writeMeBase.add("Base Set");
         writeMeBase.add("========\n");
-        writeMeBase.add("Total in Base Set: " + baseSize);
+        writeMeBase.add("Total in Base Set: " + baseSetSize);
         
         for (int i=1; i < 11; i++) {
         	writeMeBase.add("Key: " + sampleBaseKey.get(i));
@@ -136,21 +140,30 @@ public class WikiDriver extends Driver {
         // hub and authority scores time
         JavaPairRDD<Long, Double> hubScores = linkedToRootRDD.mapToPair(f -> new Tuple2<Long, Double>(f._1, 1.0));
         JavaPairRDD<Long, Double> authorityScores = hubScores;
+        long numberOfHubScores, numberOfAuthorityScores;
+        numberOfHubScores = numberOfAuthorityScores = hubScores.count();
         
         boolean isScoreConverged = false;
+        int numberOfConverganceLoops = 0;
         
         while (!isScoreConverged) {
+        	numberOfConverganceLoops++;
         	JavaPairRDD<Long, Double> rawAuthorityScores = flattenedLinks.join(hubScores).mapToPair(f -> new Tuple2<>(f._2._1, f._2._2)).reduceByKey((x, y) -> x + y);
-        	JavaPairRDD<Long, Double> rawHubScores = flattenedLinks.mapToPair(f -> new Tuple2<Long, Long>(f._2, f._1)).join(rawAuthorityScores).mapToPair(f -> new Tuple2<Long, Double>(f._2._1, f._2._2)).reduceByKey((x, y)-> x + y);
         	
         	double authrorityScoresSum = rawAuthorityScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
         	JavaPairRDD<Long, Double> normalizedAuthorityScores = rawAuthorityScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / authrorityScoresSum)));
         	
-        	double hubScoresSum = rawHubScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
-        	JavaPairRDD<Long, Double> normalizedHubScores = rawAuthorityScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / hubScoresSum)));
+        	JavaPairRDD<Long, Double> rawHubScores = flattenedLinks.mapToPair(f -> new Tuple2<Long, Long>(f._2, f._1)).join(normalizedAuthorityScores).mapToPair(f -> new Tuple2<Long, Double>(f._2._1, f._2._2)).reduceByKey((x, y)-> x + y);
         	
-        	boolean isAuthorityConverged = hasScoreConverged(normalizedAuthorityScores, authorityScores);
-        	boolean isHubConverged = hasScoreConverged(normalizedHubScores, hubScores);
+        	//double authrorityScoresSum = rawAuthorityScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
+        	//JavaPairRDD<Long, Double> normalizedAuthorityScores = rawAuthorityScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / authrorityScoresSum)));
+        	
+        	double hubScoresSum = rawHubScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
+        	JavaPairRDD<Long, Double> normalizedHubScores = rawHubScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / hubScoresSum)));
+        	
+        	// rootSetRDD.values().collect().size();
+        	boolean isAuthorityConverged = hasScoreConverged(normalizedAuthorityScores, authorityScores, numberOfAuthorityScores);
+        	boolean isHubConverged = hasScoreConverged(normalizedHubScores, hubScores, numberOfHubScores);
         	
         	if (isAuthorityConverged && isHubConverged) {
         		isScoreConverged = true;
@@ -160,6 +173,20 @@ public class WikiDriver extends Driver {
         	}
         	
         }
+        
+        /**
+        for (int i=0; i < 50; i++) {
+        	JavaPairRDD<Long, Double> rawAuthorityScores = flattenedLinks.join(hubScores).mapToPair(f -> new Tuple2<>(f._2._1, f._2._2)).reduceByKey((x, y) -> x + y);
+        	
+        	double authrorityScoresSum = rawAuthorityScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
+        	authorityScores = rawAuthorityScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / authrorityScoresSum)));
+        	
+        	JavaPairRDD<Long, Double> rawHubScores = flattenedLinks.mapToPair(f -> new Tuple2<Long, Long>(f._2, f._1)).join(authorityScores).mapToPair(f -> new Tuple2<Long, Double>(f._2._1, f._2._2)).reduceByKey((x, y)-> x + y);
+        	
+        	double hubScoresSum = rawHubScores.mapToPair(f -> new Tuple2<String, Double>("Current Sum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
+        	hubScores = rawHubScores.mapToPair(f -> new Tuple2<Long, Double>(f._1, (f._2 / hubScoresSum)));
+        }
+        **/
         
         // print scores for top 50 in descending order
         JavaPairRDD<String, Double> joinedHubScores = hubScores.join(rootSetRDD).mapToPair(f -> new Tuple2<Double, String>(f._2._1, f._2._2))
@@ -176,6 +203,7 @@ public class WikiDriver extends Driver {
         List<String> writeMeHub = new ArrayList<>();
         writeMeHub.add("Hub Set");
         writeMeHub.add("=======\n");
+        writeMeHub.add("Number of Loops took to Converge to " + ACCURACY_PERCENT + ": " + numberOfConverganceLoops + "\n");
         
         int hubCount = 0;
         
@@ -188,7 +216,7 @@ public class WikiDriver extends Driver {
         }
         
         for (int i = 0; i < hubCount; i++) {
-        	writeMeHub.add("Key: " + hubKeys.get(i) +  "Hub Score: " + hubValues.get(i));
+        	writeMeHub.add("Key: " + hubKeys.get(i) +  " Hub Score: " + hubValues.get(i));
         }
         
         sc.parallelize(writeMeHub, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/HubScores", HDFS_SERVER));
@@ -211,7 +239,7 @@ public class WikiDriver extends Driver {
         }
         
         for (int i = 0; i < authorityCount; i++) {
-        	writeMeAuthority.add("Key: " + authorityKeys.get(i) +  "Authority Score: " + authorityValues.get(i));
+        	writeMeAuthority.add("Key: " + authorityKeys.get(i) +  " Authority Score: " + authorityValues.get(i));
         }
         
         sc.parallelize(writeMeAuthority, 1).saveAsTextFile(String.format("hdfs://%s/cs535/PA1/output/AuthorityScores", HDFS_SERVER));
@@ -434,33 +462,17 @@ public class WikiDriver extends Driver {
         
 	}
 	
-	private static boolean hasScoreConverged(JavaPairRDD<Long, Double> newScores, JavaPairRDD<Long, Double> oldScores) {
+	private static boolean hasScoreConverged(JavaPairRDD<Long, Double> newScores, JavaPairRDD<Long, Double> oldScores, long numberOfScores) {
 		JavaPairRDD<Long, Double> mergedScores = newScores.join(oldScores).filter(f -> {
-			if (Math.abs((f._2._1 - f._2._2)) > 0.01) {
+			if (Math.abs((f._2._1 - f._2._2)) > ACCURACY_PERCENT) {
 				return true;
 			}
 			return false;
 			
 		}).mapToPair(f -> new Tuple2<>(f._1, f._2._1));
 		
-		return mergedScores.count() < 10;
-	}
-	
-	private static boolean isRowValid(String split, String query) {
-		if (split != null) {
-			
-			String[] splitArray = split.trim().split(FILE_DELIMITER);
-
-			for (String s : splitArray) {
-				if (s != null) {
-					if (s.trim().toLowerCase().contains(query.trim().toLowerCase())) {
-						return true;
-					}
-				}
-			}
-		}
-		return false;
-		
+		//return mergedScores.count() < 10;
+		return ((mergedScores.count() / numberOfScores) > PERCENTILE_CORRECT);
 	}
 	
 	private static boolean isEmptyValue(String s) {
