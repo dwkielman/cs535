@@ -8,6 +8,7 @@ import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.storage.StorageLevel;
 
 import scala.Tuple2;
 
@@ -53,7 +54,7 @@ public class WikiDriver extends Driver {
         JavaRDD<String> titlesRDD = sc.textFile(HDFS_TITLES_SORTED).filter(s -> isEmptyValue(s));
         JavaPairRDD<String, Long> titlesWithIndexRDD = titlesRDD.zipWithIndex().mapToPair(s -> new Tuple2<String, Long>(s._1.toLowerCase(), (s._2 + 1)));
         JavaPairRDD<String, Long> filteredTitlesWithIndex = titlesWithIndexRDD.filter(s -> s._1.contains(loweredQuery));
-        JavaPairRDD<Long, String> rootSetRDD = filteredTitlesWithIndex.mapToPair(f -> new Tuple2<Long, String>(f._2, f._1)).cache();
+        JavaPairRDD<Long, String> rootSetRDD = filteredTitlesWithIndex.mapToPair(f -> new Tuple2<Long, String>(f._2, f._1)).persist(StorageLevel.MEMORY_ONLY());
         
         filteredTitlesWithIndex.saveAsTextFile(String.format("%s/RootSet", HDFS_OUTPUT_LOCATION));
         
@@ -94,7 +95,7 @@ public class WikiDriver extends Driver {
         JavaPairRDD<Long, Long> otherHalfRootLinkWithWholeSet = reverseRootLinkWithWholeSet.mapToPair(f -> f.swap());
         
         // union together for base set
-        JavaPairRDD<Long, Long> baseSetRDD = rootLinkWithWholeSet.union(otherHalfRootLinkWithWholeSet).cache();
+        JavaPairRDD<Long, Long> baseSetRDD = rootLinkWithWholeSet.union(otherHalfRootLinkWithWholeSet).persist(StorageLevel.MEMORY_ONLY());
 
         // Hub and Authority scores work
         
@@ -108,12 +109,16 @@ public class WikiDriver extends Driver {
         JavaPairRDD<Long, String> prettyBasePrint = hubScores.join(titlesWithIndexRDD.mapToPair(f -> f.swap())).mapToPair(f -> new Tuple2<Long, String>(f._1, f._2._2));
         prettyBasePrint.saveAsTextFile(String.format("%s/BaseSet", HDFS_OUTPUT_LOCATION));
 
-        //String debug = "BEFORE CONVERGIN: AUTHORITY SCORES = " + authorityScores.count() + "\n";
         long numberOfHubScores, numberOfAuthorityScores;
         numberOfHubScores = numberOfAuthorityScores = hubScores.count();
 
         boolean isScoreConverged = false;
         int numberOfConverganceLoops = 0;
+        
+        float hubPercentCorrect = 0;
+        float authorityPercentCorrect = 0;
+        
+        JavaPairRDD<Long, Long> reversedBaseSetRDD = baseSetRDD.mapToPair(f -> f.swap()).persist(StorageLevel.MEMORY_ONLY());
         
         while (!isScoreConverged) {
         	numberOfConverganceLoops++;
@@ -128,7 +133,7 @@ public class WikiDriver extends Driver {
 
         	// hub scores
         	// raw hub scores are calculated similarly, but this time we use the normalized authority scores and combine all authority score for a given hub index
-        	JavaPairRDD<Long, Double> rawHubScores = baseSetRDD.mapToPair(f -> new Tuple2<Long, Long>(f._2, f._1)).join(normalizedAuthorityScores).mapToPair(f -> new Tuple2<Long, Double>(f._2._1, f._2._2)).reduceByKey((x, y)-> x + y);
+        	JavaPairRDD<Long, Double> rawHubScores = reversedBaseSetRDD.join(normalizedAuthorityScores).mapToPair(f -> new Tuple2<Long, Double>(f._2._1, f._2._2)).reduceByKey((x, y)-> x + y);
 
         	// normalizing, same process as authority scores normalization
         	double hubScoresSum = rawHubScores.mapToPair(f -> new Tuple2<String, Double>("hubSum", f._2)).reduceByKey((x, y) -> x + y).collect().get(0)._2;
@@ -139,6 +144,11 @@ public class WikiDriver extends Driver {
         	
         	// when both have converged then break, otherwise the normalized scores are the new scores
         	if (isAuthorityConverged && isHubConverged) {
+        		hubScores = normalizedHubScores;
+        		authorityScores = normalizedAuthorityScores;
+        		hubPercentCorrect = getPercentageCorrect(normalizedHubScores, hubScores, numberOfHubScores);
+        		authorityPercentCorrect = getPercentageCorrect(normalizedAuthorityScores, authorityScores, numberOfAuthorityScores);
+        		
         		isScoreConverged = true;
         	} else {
         		hubScores = normalizedHubScores;
@@ -146,7 +156,11 @@ public class WikiDriver extends Driver {
         	}
         	
         	// emergency break out of loop in case scores don't converge to proper percent accurate
-        	if (numberOfConverganceLoops >= 25) {
+        	if (numberOfConverganceLoops >= 50) {
+        		hubScores = normalizedHubScores;
+        		authorityScores = normalizedAuthorityScores;
+        		hubPercentCorrect = getPercentageCorrect(normalizedHubScores, hubScores, numberOfHubScores);
+        		authorityPercentCorrect = getPercentageCorrect(normalizedAuthorityScores, authorityScores, numberOfAuthorityScores);
         		isScoreConverged = true;
         		break;
         	}
@@ -154,9 +168,7 @@ public class WikiDriver extends Driver {
         
         // print authority and hub scores for at least top 50 in descending order
         JavaPairRDD<String, Double> joinedHubScores = hubScores.join(rootSetRDD).mapToPair(f -> new Tuple2<Double, String>(f._2._1, f._2._2)).sortByKey(false).mapToPair(f -> new Tuple2<String, Double>(f._2, f._1));
-        
-        JavaPairRDD<String, Double> joinedAuthorityScores = authorityScores.join(rootSetRDD).mapToPair(f -> new Tuple2<Double, String>(f._2._1, f._2._2)).sortByKey(false).mapToPair(f -> new Tuple2<String, Double>(f._2, f._1));
-        
+
         List<String> hubKeys = joinedHubScores.keys().collect();
         List<Double> hubValues = joinedHubScores.values().collect();
         
@@ -165,14 +177,15 @@ public class WikiDriver extends Driver {
         writeMeHub.add("=======\n");
         writeMeHub.add("Number of Loops took to Converge to " + new DecimalFormat("#0.000000").format(ACCURACY_PERCENT) + ": " + numberOfConverganceLoops + "\n");
         writeMeHub.add("Hub total number of entries for " + loweredQuery + ": " + hubKeys.size() + "\n");
+        writeMeHub.add("Hub percentage correct: " + hubPercentCorrect + "\n");
         
         int hubCount = 0;
         
         if (hubKeys.size() > 0) {
-        	if (hubKeys.size() < 100) {
+        	if (hubKeys.size() < 50) {
         		hubCount = hubKeys.size();
         	} else {
-        		hubCount = 100;
+        		hubCount = 50;
         	}
         }
         
@@ -182,6 +195,8 @@ public class WikiDriver extends Driver {
         
         sc.parallelize(writeMeHub, 1).saveAsTextFile(String.format("%s/HubScores", HDFS_OUTPUT_LOCATION));
         
+        JavaPairRDD<String, Double> joinedAuthorityScores = authorityScores.join(rootSetRDD).mapToPair(f -> new Tuple2<Double, String>(f._2._1, f._2._2)).sortByKey(false).mapToPair(f -> new Tuple2<String, Double>(f._2, f._1));
+
         List<String> authorityKeys = joinedAuthorityScores.keys().collect();
         List<Double> authorityValues = joinedAuthorityScores.values().collect();
 
@@ -190,14 +205,15 @@ public class WikiDriver extends Driver {
         writeMeAuthority.add("=============\n");
         writeMeAuthority.add("Number of Loops took to Converge to " + new DecimalFormat("#0.000000").format(ACCURACY_PERCENT) + ": " + numberOfConverganceLoops + "\n");
         writeMeAuthority.add("Authority total number of entries for " + loweredQuery + ": " + authorityKeys.size() + "\n");
+        writeMeAuthority.add("Authority percentage correct: " + authorityPercentCorrect + "\n");
         
         int authorityCount = 0;
         
         if (authorityKeys.size() > 0) {
-        	if (authorityKeys.size() < 100) {
+        	if (authorityKeys.size() < 50) {
         		authorityCount = authorityKeys.size();
         	} else {
-        		authorityCount = 100;
+        		authorityCount = 50;
         	}
         }
         
@@ -221,6 +237,19 @@ public class WikiDriver extends Driver {
 		float percent = (joinedScoresCount * 100.0f) / numberOfScores;
 		
 		return (percent > PERCENTILE_CORRECT);
+	}
+	
+	private static float getPercentageCorrect(JavaPairRDD<Long, Double> newScores, JavaPairRDD<Long, Double> oldScores, long numberOfScores) {
+		long joinedScoresCount = newScores.join(oldScores).filter(f -> {
+			if (Math.abs((f._2._1 - f._2._2)) < ACCURACY_PERCENT) {
+				return true;
+			}
+			return false;
+		}).count();
+
+		float percent = (joinedScoresCount * 100.0f) / numberOfScores;
+		
+		return percent;
 	}
 	
 	// validate entries in the source files
